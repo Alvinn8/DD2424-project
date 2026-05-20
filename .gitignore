@@ -10,3 +10,10 @@ wheels/
 .venv
 
 *.pdf
+.DS_Store
+
+models/*
+!models/.gitkeep
+
+test_images/*
+!test_images/.gitkeep
