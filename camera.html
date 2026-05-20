@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera Breed Overlay</title>
+    <style>
+        :root {
+            color-scheme: light;
+        }
+        body {
+            margin: 0;
+            font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+            background: linear-gradient(135deg, #f7f2e9, #dfe9f3);
+            display: grid;
+            place-items: center;
+            min-height: 100vh;
+        }
+        .stage {
+            position: relative;
+            width: min(80vmin, 640px);
+            aspect-ratio: 1 / 1;
+            border-radius: 18px;
+            overflow: hidden;
+            box-shadow: 0 20px 40px rgba(20, 30, 50, 0.2);
+            background: #111;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .overlay {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            padding: 16px;
+            box-sizing: border-box;
+        }
+        .label {
+            background: rgba(0, 0, 0, 0.6);
+            color: #f8f8f8;
+            padding: 10px 14px;
+            border-radius: 12px;
+            font-size: 18px;
+            letter-spacing: 0.3px;
+            text-align: center;
+            min-width: 60%;
+        }
+        .status {
+            margin-top: 10px;
+            font-size: 13px;
+            color: #444;
+            text-align: center;
+        }
+        video {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <div class="stage">
+            <video id="video" playsinline></video>
+            <canvas id="view" width="640" height="640"></canvas>
+            <div class="overlay">
+                <div class="label" id="label">Waiting for prediction...</div>
+            </div>
+        </div>
+        <div class="status" id="status">Initializing camera and websocket...</div>
+    </div>
+
+    <script>
+        const video = document.getElementById("video");
+        const viewCanvas = document.getElementById("view");
+        const viewCtx = viewCanvas.getContext("2d");
+        const label = document.getElementById("label");
+        const status = document.getElementById("status");
+
+        const captureCanvas = document.createElement("canvas");
+        captureCanvas.width = 224;
+        captureCanvas.height = 224;
+        const captureCtx = captureCanvas.getContext("2d");
+
+        let ws = null;
+        let isStreaming = false;
+
+        function getCenterSquareRect(width, height) {
+            const side = Math.min(width, height);
+            const sx = Math.floor((width - side) / 2);
+            const sy = Math.floor((height - side) / 2);
+            return { sx, sy, side };
+        }
+
+        function updateViewCanvas() {
+            if (!isStreaming) {
+                return;
+            }
+            const { videoWidth, videoHeight } = video;
+            if (videoWidth === 0 || videoHeight === 0) {
+                requestAnimationFrame(updateViewCanvas);
+                return;
+            }
+            const { sx, sy, side } = getCenterSquareRect(videoWidth, videoHeight);
+            viewCtx.drawImage(video, sx, sy, side, side, 0, 0, viewCanvas.width, viewCanvas.height);
+            requestAnimationFrame(updateViewCanvas);
+        }
+
+        function connectWebSocket() {
+            ws = new WebSocket("ws://localhost:12345");
+            ws.binaryType = "arraybuffer";
+
+            ws.onopen = () => {
+                status.textContent = "WebSocket connected.";
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    const breedName = data.breed_name ?? "Unknown";
+                    const confidence = data.confidence ?? "?";
+                    label.textContent = `${breedName} (${confidence})`;
+                } catch (error) {
+                    status.textContent = "WebSocket message parse error.";
+                }
+            };
+
+            ws.onclose = () => {
+                status.textContent = "WebSocket disconnected. Retrying...";
+                setTimeout(connectWebSocket, 1000);
+            };
+
+            ws.onerror = () => {
+                status.textContent = "WebSocket error.";
+            };
+        }
+
+        function sendFrame() {
+            if (!isStreaming || !ws || ws.readyState !== WebSocket.OPEN) {
+                return;
+            }
+            const { videoWidth, videoHeight } = video;
+            if (videoWidth === 0 || videoHeight === 0) {
+                return;
+            }
+            const { sx, sy, side } = getCenterSquareRect(videoWidth, videoHeight);
+            captureCtx.drawImage(video, sx, sy, side, side, 0, 0, 224, 224);
+
+            captureCanvas.toBlob((blob) => {
+                if (blob && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(blob);
+                }
+            }, "image/jpeg", 0.9);
+        }
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: "environment" },
+                    audio: false
+                });
+                video.srcObject = stream;
+                await video.play();
+                isStreaming = true;
+                status.textContent = "Camera ready.";
+                requestAnimationFrame(updateViewCanvas);
+            } catch (error) {
+                status.textContent = "Camera access denied or unavailable.";
+            }
+        }
+
+        connectWebSocket();
+        startCamera();
+        setInterval(sendFrame, 1000);
+    </script>
+</body>
+</html>
