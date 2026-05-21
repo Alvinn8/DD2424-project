@@ -39,31 +39,49 @@ class OxfordIIITPetDataset(torch.utils.data.Dataset):
             tensor = self.transform(tensor)
         return tensor, label
 
+class TransformedDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, transform):
+        self.dataset = dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        tensor, label = self.dataset[idx]
+        if self.transform:
+            tensor = self.transform(tensor)
+        return tensor, label
+
 # These numbers are from the PyTorch guide and seem to be the values from
 # ImageNet which is what ResNet18 was trained on.
 mean = [0.485, 0.456, 0.406]
 std = [0.229, 0.224, 0.225]
 
 def load_datasets():
-    trainval_dataset = OxfordIIITPetDataset(dataset_path, type="trainval", transform=torchvision.transforms.Compose([
+    train_transform = torchvision.transforms.Compose([
         torchvision.transforms.ToPILImage(),
         # Resize so that all images are the same size. 224x224 for ResNet18.
-        #torchvision.transforms.Resize((224, 224)),
+        torchvision.transforms.Resize((224, 224)),
         torchvision.transforms.RandomRotation(10),
         torchvision.transforms.RandomResizedCrop(224),
         torchvision.transforms.RandomHorizontalFlip(),
+        #torchvision.transforms.Resize(256),
+        #torchvision.transforms.CenterCrop(224),
         # Convert RGB images to [0, 1] tensors
         torchvision.transforms.ToTensor(),
         # Normalize.
         torchvision.transforms.Normalize(mean=mean, std=std),
-    ]))
-    test_dataset = OxfordIIITPetDataset(dataset_path, type="test", transform=torchvision.transforms.Compose([
+    ])
+    test_transform = torchvision.transforms.Compose([
         torchvision.transforms.ToPILImage(),
         torchvision.transforms.Resize(256),
         torchvision.transforms.CenterCrop(224),
         torchvision.transforms.ToTensor(),
         torchvision.transforms.Normalize(mean=mean, std=std),
-    ]))
+    ])
+    trainval_dataset = OxfordIIITPetDataset(dataset_path, type="trainval", transform=None)
+    test_dataset = OxfordIIITPetDataset(dataset_path, type="test", transform=test_transform)
 
     # Split trainval dataset into train and val
     trainval_length = len(trainval_dataset)
@@ -73,6 +91,8 @@ def load_datasets():
     generator = torch.Generator().manual_seed(42)
 
     train_dataset, val_dataset = torch.utils.data.random_split(trainval_dataset, [train_length, val_length], generator=generator)
+    train_dataset = TransformedDataset(train_dataset, transform=train_transform)
+    val_dataset = TransformedDataset(val_dataset, transform=test_transform)
 
     print(f"Train dataset length: {len(train_dataset)}")
     print(f"Validation dataset length: {len(val_dataset)}")
@@ -183,6 +203,25 @@ def evaluate_model_once(model, iterator, data_loader, loss_fn):
     loss = loss_fn(outputs, labels).item()
     return accuracy, loss, iterator
 
+def get_resnet_layers(model):
+    layers = []
+    layers.append(model.conv1)
+    for blocks in [model.layer1, model.layer2, model.layer3, model.layer4]:
+        for basicblock in blocks:
+            layers.append(basicblock.conv1)
+            layers.append(basicblock.conv2)
+    return layers
+
+def unfreeze_last_layers(model, l):
+    it = iter(reversed(get_resnet_layers(model)))
+    for layer, _ in zip(it, range(l)):
+        for param in layer.parameters():
+            param.requires_grad = True
+
+def freeze_all_layers(model):
+    for param in model.parameters():
+        param.requires_grad = False
+
 def train_breed_classification():
     train_loader, val_loader, test_loader = load_datasets()
 
@@ -203,11 +242,17 @@ def train_breed_classification():
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
-    # Freeze all parameters except last fully connected layer
-    for param in model.parameters():
-        param.requires_grad = False
-    for param in model.fc.parameters():
-        param.requires_grad = True
+    # Freeze all parameters except last l layers
+    #print(f"Freezing all layers except the last {l} layers and the classification layer")
+    freeze_all_layers(model)
+    l = 2
+    unfreeze_last_layers(model, l+1) # +1 to also unfreeze classification layer
+
+    #freeze_all_layers(model)
+    #start_unfreeze_l = 3 # number of layers to unfreeze at the start of training
+    #start_unfreeze_after_epoch = 3 # epoch to start unfreezing layers
+    #layers_per_epoch = 2 # number of layers to unfreeze each epoch after start_unfreeze_after_epoch
+    #unfreeze_last_layers(model, start_unfreeze_l)
 
     history = {
         'x': [],
@@ -218,6 +263,8 @@ def train_breed_classification():
     # Keep an iterator for the validation loader so we can evaluate only one batch
     # at the time instead of all validation data.
     val_loader_iter = iter(val_loader)
+
+    start_time = datetime.datetime.now()
 
     smooth_loss = None
     smooth_val_loss = None
@@ -252,24 +299,43 @@ def train_breed_classification():
 
         # Step scheduler to reduce learning rate if needed
         scheduler.step()
-        # if epoch == 2:
-        #     # Unfreeze all layers after 3 epochs
-        #     print("Unfreezing all layers for fine-tuning")
-        #     for param in model.parameters():
-        #         param.requires_grad = True
+        #if epoch >= start_unfreeze_after_epoch - 1:
+        #    to_unfreeze = start_unfreeze_l + (epoch - start_unfreeze_after_epoch + 2) * layers_per_epoch # number of layers to unfreeze at the current epoch
+        #    print(f"Unfreezing {to_unfreeze} layers for fine-tuning")
+        #    unfreeze_last_layers(model, to_unfreeze)
+        if epoch == 5:
+            # Unfreeze all layers after 6 epochs
+            print("Unfreezing all layers for fine-tuning")
+            for param in model.parameters():
+                param.requires_grad = True
 
         # Check accuracy on validation set
         val_accuracy, val_loss = evaluate_model(model, val_loader, loss_fn)
         print(f"Validation Accuracy: {val_accuracy:.2f}%")
     
+    # Check accuracy on validation set
+    val_accuracy, val_loss = evaluate_model(model, val_loader, loss_fn)
+    print(f"Final Validation Accuracy: {val_accuracy:.2f}%")
+    print(f"Final Validation Loss: {val_loss:.4f}")
+
     # Check accuracy on test set
     test_accuracy, test_loss = evaluate_model(model, test_loader, loss_fn)
-    print(f"Test Accuracy: {test_accuracy:.2f}%")
+    print(f"Test Accuracy: {test_accuracy:.2f}% ONLY USE FOR INTEREST, NOT FOR MODEL SELECTION")
     print(f"Test Loss: {test_loss:.4f}")
+
+    end_time = datetime.datetime.now()
+    elapsed_time = end_time - start_time
+    print(f"Training time: {elapsed_time}")
 
     # Save the model
     date_identifier = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    torch.save(model.state_dict(), f"models/resnet18_breed_{date_identifier}_acc{int(test_accuracy*100)}.pth")
+    acc_identifier = int(val_accuracy*100)
+    #l_identifier = f"lstart{start_unfreeze_after_epoch}_li{start_unfreeze_l}x{layers_per_epoch}"
+    l_identifier = f"l{l}_unfreeze3_epoch30"
+    torch.save(model.state_dict(), f"models/resnet18_breed_{date_identifier}_valacc{acc_identifier}_{l_identifier}_time{elapsed_time.total_seconds():.0f}.pth")
+
+    # send ntfy notification request
+    os.system(f"curl -d 'Training complete! Validation accuracy: {val_accuracy:.2f}%' -H 'Title: Training Done' https://ntfy.sh/alvin_4132_dd2424_training_done")
 
     # Plot training and validation loss
     plt.figure()
