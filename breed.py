@@ -62,12 +62,12 @@ def load_datasets():
     train_transform = torchvision.transforms.Compose([
         torchvision.transforms.ToPILImage(),
         # Resize so that all images are the same size. 224x224 for ResNet18.
-        torchvision.transforms.Resize((224, 224)),
-        torchvision.transforms.RandomRotation(10),
-        torchvision.transforms.RandomResizedCrop(224),
-        torchvision.transforms.RandomHorizontalFlip(),
-        #torchvision.transforms.Resize(256),
-        #torchvision.transforms.CenterCrop(224),
+        #torchvision.transforms.Resize((224, 224)),
+        #torchvision.transforms.RandomRotation(10),
+        #torchvision.transforms.RandomResizedCrop(224),
+        #torchvision.transforms.RandomHorizontalFlip(),
+        torchvision.transforms.Resize(256),
+        torchvision.transforms.CenterCrop(224),
         # Convert RGB images to [0, 1] tensors
         torchvision.transforms.ToTensor(),
         # Normalize.
@@ -85,7 +85,7 @@ def load_datasets():
 
     # Split trainval dataset into train and val
     trainval_length = len(trainval_dataset)
-    train_length = int(0.8 * trainval_length)
+    train_length = int(0.08 * trainval_length)
     val_length = trainval_length - train_length
 
     generator = torch.Generator().manual_seed(42)
@@ -244,15 +244,15 @@ def train_breed_classification():
 
     # Freeze all parameters except last l layers
     #print(f"Freezing all layers except the last {l} layers and the classification layer")
-    freeze_all_layers(model)
-    l = 2
-    unfreeze_last_layers(model, l+1) # +1 to also unfreeze classification layer
-
     #freeze_all_layers(model)
-    #start_unfreeze_l = 3 # number of layers to unfreeze at the start of training
-    #start_unfreeze_after_epoch = 3 # epoch to start unfreezing layers
-    #layers_per_epoch = 2 # number of layers to unfreeze each epoch after start_unfreeze_after_epoch
-    #unfreeze_last_layers(model, start_unfreeze_l)
+    #l = 2
+    #unfreeze_last_layers(model, l+1) # +1 to also unfreeze classification layer
+
+    freeze_all_layers(model)
+    start_unfreeze_l = 3 # number of layers to unfreeze at the start of training
+    start_unfreeze_after_epoch = 3 # epoch to start unfreezing layers
+    layers_per_epoch = 2 # number of layers to unfreeze each epoch after start_unfreeze_after_epoch
+    unfreeze_last_layers(model, start_unfreeze_l)
 
     history = {
         'x': [],
@@ -285,7 +285,7 @@ def train_breed_classification():
             
             update_step += 1
             if batch_num % 5 == 0:
-                factor = 0.95
+                factor = 0.5
                 val_accuracy_batch, val_loss_batch, val_loader_iter = evaluate_model_once(model, val_loader_iter, val_loader, loss_fn)
                 if smooth_val_loss is None or val_loss_batch is None:
                     smooth_loss = batch_loss.item()
@@ -303,15 +303,15 @@ def train_breed_classification():
         #    to_unfreeze = start_unfreeze_l + (epoch - start_unfreeze_after_epoch + 2) * layers_per_epoch # number of layers to unfreeze at the current epoch
         #    print(f"Unfreezing {to_unfreeze} layers for fine-tuning")
         #    unfreeze_last_layers(model, to_unfreeze)
-        if epoch == 5:
-            # Unfreeze all layers after 6 epochs
+        if epoch == 2:
+            # Unfreeze all layers after 3 epochs
             print("Unfreezing all layers for fine-tuning")
             for param in model.parameters():
                 param.requires_grad = True
 
         # Check accuracy on validation set
-        val_accuracy, val_loss = evaluate_model(model, val_loader, loss_fn)
-        print(f"Validation Accuracy: {val_accuracy:.2f}%")
+        #val_accuracy, val_loss = evaluate_model(model, val_loader, loss_fn)
+        #print(f"Validation Accuracy: {val_accuracy:.2f}%")
     
     # Check accuracy on validation set
     val_accuracy, val_loss = evaluate_model(model, val_loader, loss_fn)
@@ -331,11 +331,13 @@ def train_breed_classification():
     date_identifier = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     acc_identifier = int(val_accuracy*100)
     #l_identifier = f"lstart{start_unfreeze_after_epoch}_li{start_unfreeze_l}x{layers_per_epoch}"
-    l_identifier = f"l{l}_unfreeze3_epoch30"
+    l_identifier = f"l2_unfreeze3_epoch{num_epochs}"
+    #l_identifier = f"l{l}_epoch{num_epochs}"
     torch.save(model.state_dict(), f"models/resnet18_breed_{date_identifier}_valacc{acc_identifier}_{l_identifier}_time{elapsed_time.total_seconds():.0f}.pth")
 
     # send ntfy notification request
-    os.system(f"curl -d 'Training complete! Validation accuracy: {val_accuracy:.2f}%' -H 'Title: Training Done' https://ntfy.sh/alvin_4132_dd2424_training_done")
+    if elapsed_time.total_seconds() > 2*60:
+        os.system(f"curl -d 'Training complete! Validation accuracy: {val_accuracy:.2f}%' -H 'Title: Training Done' https://ntfy.sh/alvin_4132_dd2424_training_done")
 
     # Plot training and validation loss
     plt.figure()
@@ -391,6 +393,8 @@ if __name__ == "__main__":
     print("Do you want to train or apply?")
     choice = input("Enter 'train' or 'apply': ")
     if choice == "train":
+        #for l in [0, 1, 2, 3, 4, 8, 12, 16]:
+        #    train_breed_classification(l)
         train_breed_classification()
     elif choice == "apply":
         apply_model()
