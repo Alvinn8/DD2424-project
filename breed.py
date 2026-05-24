@@ -58,16 +58,39 @@ class TransformedDataset(torch.utils.data.Dataset):
 mean = [0.485, 0.456, 0.406]
 std = [0.229, 0.224, 0.225]
 
+def stratified_split(dataset, train_fraction, generator):
+    # Get the labels for stratification
+    labels = [dataset.annotations[i][1] for i in range(len(dataset))]
+    labels = np.array(labels)
+
+    # Get unique classes and their indices
+    classes, class_indices = np.unique(labels, return_inverse=True)
+
+    # Create stratified splits
+    train_indices = []
+    val_indices = []
+    for class_idx in range(len(classes)):
+        class_member_indices = np.where(class_indices == class_idx)[0]
+        num_train_samples = int(train_fraction * len(class_member_indices))
+        if num_train_samples == 0:
+            #print(f"Warning: Class {classes[class_idx]} has only {len(class_member_indices)} samples, assigning 1 sample to training set.")
+            num_train_samples = 1
+        shuffled_indices = torch.randperm(len(class_member_indices), generator=generator).tolist()
+        train_indices.extend(class_member_indices[shuffled_indices[:num_train_samples]])
+        val_indices.extend(class_member_indices[shuffled_indices[num_train_samples:]])
+
+    return torch.utils.data.Subset(dataset, train_indices), torch.utils.data.Subset(dataset, val_indices)
+
 def load_datasets():
     train_transform = torchvision.transforms.Compose([
         torchvision.transforms.ToPILImage(),
         # Resize so that all images are the same size. 224x224 for ResNet18.
-        #torchvision.transforms.Resize((224, 224)),
-        #torchvision.transforms.RandomRotation(10),
-        #torchvision.transforms.RandomResizedCrop(224),
-        #torchvision.transforms.RandomHorizontalFlip(),
         torchvision.transforms.Resize(256),
-        torchvision.transforms.CenterCrop(224),
+        torchvision.transforms.RandomRotation(10),
+        torchvision.transforms.RandomResizedCrop(224),
+        torchvision.transforms.RandomHorizontalFlip(),
+        #torchvision.transforms.Resize(256),
+        #torchvision.transforms.CenterCrop(224),
         # Convert RGB images to [0, 1] tensors
         torchvision.transforms.ToTensor(),
         # Normalize.
@@ -83,14 +106,9 @@ def load_datasets():
     trainval_dataset = OxfordIIITPetDataset(dataset_path, type="trainval", transform=None)
     test_dataset = OxfordIIITPetDataset(dataset_path, type="test", transform=test_transform)
 
-    # Split trainval dataset into train and val
-    trainval_length = len(trainval_dataset)
-    train_length = int(0.08 * trainval_length)
-    val_length = trainval_length - train_length
-
     generator = torch.Generator().manual_seed(42)
 
-    train_dataset, val_dataset = torch.utils.data.random_split(trainval_dataset, [train_length, val_length], generator=generator)
+    train_dataset, val_dataset = stratified_split(trainval_dataset, 0.08, generator)
     train_dataset = TransformedDataset(train_dataset, transform=train_transform)
     val_dataset = TransformedDataset(val_dataset, transform=test_transform)
 
@@ -165,6 +183,13 @@ def show_image(image_tensor, title):
     plt.axis("off")
     plt.show()
 
+def count_classes(dataset):
+    class_counts = {}
+    for _, label in dataset:
+        label = label.item() if isinstance(label, torch.Tensor) else label
+        class_counts[label] = class_counts.get(label, 0) + 1
+    return class_counts
+
 def evaluate_model(model, data_loader, loss_fn):
     model.eval()
     correct = 0
@@ -222,12 +247,19 @@ def freeze_all_layers(model):
     for param in model.parameters():
         param.requires_grad = False
 
-def train_breed_classification():
-    train_loader, val_loader, test_loader = load_datasets()
-
+def train_breed_classification(train_loader, val_loader, test_loader):
     if False:
+        print("Training class counts:")
+        for cls, count in count_classes(train_loader.dataset).items():
+            print(f"  Class {cls}: {count}")
         show_batch(train_loader)
+        print("Validation class counts:")
+        for cls, count in count_classes(val_loader.dataset).items():
+            print(f"  Class {cls}: {count}")
         show_batch(val_loader)
+        print("Test class counts:")
+        for cls, count in count_classes(test_loader.dataset).items():
+            print(f"  Class {cls}: {count}")
         show_batch(test_loader)
     
     model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1).to(device)
@@ -239,20 +271,20 @@ def train_breed_classification():
 
     loss_fn = torch.nn.CrossEntropyLoss()
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
     # Freeze all parameters except last l layers
-    #print(f"Freezing all layers except the last {l} layers and the classification layer")
-    #freeze_all_layers(model)
-    #l = 2
-    #unfreeze_last_layers(model, l+1) # +1 to also unfreeze classification layer
-
+    l = 2
+    print(f"Freezing all layers except the last {l} layers and the classification layer")
     freeze_all_layers(model)
-    start_unfreeze_l = 3 # number of layers to unfreeze at the start of training
-    start_unfreeze_after_epoch = 3 # epoch to start unfreezing layers
-    layers_per_epoch = 2 # number of layers to unfreeze each epoch after start_unfreeze_after_epoch
-    unfreeze_last_layers(model, start_unfreeze_l)
+    unfreeze_last_layers(model, l+1) # +1 to also unfreeze classification layer
+
+    #freeze_all_layers(model)
+    #start_unfreeze_l = 1 # number of layers to unfreeze at the start of training
+    #start_unfreeze_after_epoch = 1 # epoch to start unfreezing layers
+    #layers_per_epoch = 1 # number of layers to unfreeze each epoch after start_unfreeze_after_epoch
+    #unfreeze_last_layers(model, start_unfreeze_l)
 
     history = {
         'x': [],
@@ -340,14 +372,14 @@ def train_breed_classification():
         os.system(f"curl -d 'Training complete! Validation accuracy: {val_accuracy:.2f}%' -H 'Title: Training Done' https://ntfy.sh/alvin_4132_dd2424_training_done")
 
     # Plot training and validation loss
-    plt.figure()
-    plt.plot(history['x'], history['train_loss'], label='Train Loss')
-    plt.plot(history['x'], history['val_loss'], label='Validation Loss')
-    plt.xlabel('Update Step')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.show()
+    #plt.figure()
+    #plt.plot(history['x'], history['train_loss'], label='Train Loss')
+    #plt.plot(history['x'], history['val_loss'], label='Validation Loss')
+    #plt.xlabel('Update Step')
+    #plt.ylabel('Loss')
+    #plt.title('Training and Validation Loss')
+    #plt.legend()
+    #plt.show()
 
 def apply_model():
     model_names = os.listdir("models")
@@ -392,10 +424,11 @@ if __name__ == "__main__":
     populate_class_id_to_breed()
     print("Do you want to train or apply?")
     choice = input("Enter 'train' or 'apply': ")
+    train_loader, val_loader, test_loader = load_datasets()
     if choice == "train":
         #for l in [0, 1, 2, 3, 4, 8, 12, 16]:
-        #    train_breed_classification(l)
-        train_breed_classification()
+        #    train_breed_classification(train_loader, val_loader, test_loader, l)
+        train_breed_classification(train_loader, val_loader, test_loader)
     elif choice == "apply":
         apply_model()
 
